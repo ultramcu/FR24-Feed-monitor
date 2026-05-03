@@ -1,0 +1,13 @@
+# macOS
+.DS_Store
+
+# editor
+.vscode/
+.idea/
+*.swp
+*~
+
+# runtime artifacts (should never end up here, but just in case)
+*.log
+*.log.old
+state
