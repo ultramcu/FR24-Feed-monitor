@@ -12,14 +12,18 @@ It runs from cron, watches the receiver, and applies the **least-disruptive reco
 
 This script is a graduated recovery ladder.
 
-| Level | Action                                | Triggered after                            |
-|-------|---------------------------------------|--------------------------------------------|
-| 0     | (no action)                           | receiver healthy                           |
-| 1     | `systemctl restart fr24feed`          | 2 consecutive unhealthy ticks (debounce)   |
-| 2     | USB re-authorize the RTL-SDR dongle   | one tick later, still unhealthy            |
-| 3     | `shutdown -r now`                     | one tick later, still unhealthy            |
+| Level | Action                                | Triggered after                                |
+|-------|---------------------------------------|------------------------------------------------|
+| 0     | (no action)                           | receiver healthy                               |
+| 1     | `systemctl restart fr24feed`          | 2 consecutive `Receiver: down` ticks (debounce)|
+| 2     | USB re-authorize the RTL-SDR dongle   | one tick later, still down                     |
+| 3     | `shutdown -r now`                     | one tick later, still down                     |
 
 State persists across cron invocations in `/var/lib/fr24-monitor/state`. A real failure walks the whole ladder in ~15 minutes; a momentary blip never escalates past level 0.
+
+### What counts as "down"
+
+Only `Receiver: down` from `fr24feed-status`. A receiver that's connected but reporting zero messages this minute is **not** a failure — that's the normal state during quiet-traffic windows (pre-dawn, low-traffic airspace) and any monitor that treats it as a fault will pointlessly restart `fr24feed` at 5 a.m. every day. Real wedges (DVB module conflict, dongle freeze, dump1090 stuck on a USB read) eventually surface as `Receiver: down` because `fr24feed`'s own internal reader watchdog gives up after enough timeout cycles, so we still catch them — we just don't act on the noisy intermediate signal.
 
 ## What this isn't
 

@@ -7,10 +7,17 @@
 #   level 2: USB reauth on the RTL-SDR       (no-op if dongle not on bus)
 #   level 3: reboot the Pi                   (last resort)
 #
-# Debounce: require CONSECUTIVE_FAILS_THRESHOLD ticks of "unhealthy" before
-# any action. Prevents false alarms during quiet-traffic windows where
-# fr24feed-status briefly reports zero messages simply because no aircraft are
-# in range. A real failure stays unhealthy for many ticks, so it still escalates.
+# Health signal: only "Receiver: down" from fr24feed-status counts as a
+# failure. A receiver that's connected but momentarily seeing zero messages is
+# NOT treated as unhealthy — that's the normal state during quiet-traffic
+# windows (pre-dawn, low-traffic airspaces) and would otherwise trigger
+# pointless restarts. Real wedges (DVB module conflict, dongle freeze, etc.)
+# eventually surface as "down" because fr24feed's own reader watchdog gives up
+# after enough timeout cycles, so we still catch them — we just don't act on
+# the noisy intermediate signal.
+#
+# Debounce: require CONSECUTIVE_FAILS_THRESHOLD ticks of "down" in a row before
+# acting. Filters transient hiccups; sustained failures still escalate.
 #
 # State persists across cron invocations in STATE_FILE; resets on recovery.
 # Run as the pi user from cron — relies on passwordless sudo (default on Pi OS).
@@ -24,12 +31,7 @@ MIN_UPTIME_MIN=15
 ESCALATE_AFTER_SEC=240        # wait at least this long between escalation steps
 RTL_VENDOR_ID="0bda"          # Realtek — covers nearly all RTL-SDR dongles
 MAX_LOG_BYTES=10485760        # 10 MB
-CONSECUTIVE_FAILS_THRESHOLD=2 # need this many ticks of "unhealthy" in a row before acting
-
-# is_healthy() exit codes:
-#   0 = healthy        (receiver connected, messages flowing)
-#   1 = unhealthy      (receiver down, or explicit "0 MSGS" steady-state)
-#   2 = indeterminate  (post-restart warmup — empty MSGS field, don't touch state)
+CONSECUTIVE_FAILS_THRESHOLD=2 # need this many ticks of "down" in a row before acting
 
 ts()  { date '+%Y-%m-%d %H:%M:%S'; }
 log() { echo "[$(ts)] $*" >> "$LOG_FILE"; }
@@ -80,9 +82,7 @@ is_healthy() {
     local out
     out=$(/usr/bin/fr24feed-status 2>&1)
     log "status: $(echo "$out" | tr '\n' '|' | sed 's/|$//')"
-    echo "$out" | grep -q "Receiver: down"             && return 1
-    echo "$out" | grep -q "Receiver: connected ( MSGS" && return 2  # empty field — warming up after restart
-    echo "$out" | grep -q "Receiver: connected (0 MSGS" && return 1
+    echo "$out" | grep -q "Receiver: down" && return 1
     return 0
 }
 
@@ -133,44 +133,33 @@ main() {
     local now
     now=$(date +%s)
 
-    is_healthy
-    local health=$?
-
-    if [ "$health" -eq 2 ]; then
-        # Empty MSGS field — fr24feed restarted recently and the stats counter
-        # has not refreshed yet. Don't claim recovery, don't claim failure;
-        # just wait for the next tick to get a real reading.
-        log "status indeterminate (post-restart warmup) — leaving state at level $LEVEL"
-        exit 0
-    fi
-
-    if [ "$health" -eq 0 ]; then
+    if is_healthy; then
         if [ "$LEVEL" -ne 0 ]; then
             local dur=$(( now - FIRST_FAIL_TS ))
             log "RECOVERED at level $LEVEL after ${dur}s — resetting state"
             LEVEL=0; LAST_ACTION_TS=0; FIRST_FAIL_TS=0; CONSECUTIVE_FAILS=0
             write_state
         elif [ "$CONSECUTIVE_FAILS" -gt 0 ]; then
-            log "transient unhealthy resolved (had ${CONSECUTIVE_FAILS} consecutive fail(s), no action taken)"
+            log "transient down resolved (had ${CONSECUTIVE_FAILS} consecutive fail(s), no action taken)"
             CONSECUTIVE_FAILS=0
             write_state
         fi
         exit 0
     fi
 
-    # health == 1 (unhealthy)
+    # Receiver is down — start or continue the escalation ladder.
     [ "$FIRST_FAIL_TS" -eq 0 ] && FIRST_FAIL_TS=$now
     CONSECUTIVE_FAILS=$(( CONSECUTIVE_FAILS + 1 ))
 
     if [ "$LEVEL" -eq 0 ] && [ "$CONSECUTIVE_FAILS" -lt "$CONSECUTIVE_FAILS_THRESHOLD" ]; then
-        log "unhealthy ${CONSECUTIVE_FAILS}/${CONSECUTIVE_FAILS_THRESHOLD} consecutive — waiting for confirmation before acting"
+        log "down ${CONSECUTIVE_FAILS}/${CONSECUTIVE_FAILS_THRESHOLD} consecutive — waiting for confirmation before acting"
         write_state
         exit 0
     fi
 
     local since_last=$(( now - LAST_ACTION_TS ))
     if [ "$LEVEL" -ge 1 ] && [ "$since_last" -lt "$ESCALATE_AFTER_SEC" ]; then
-        log "unhealthy at level $LEVEL, last action ${since_last}s ago (<${ESCALATE_AFTER_SEC}s) — waiting"
+        log "down at level $LEVEL, last action ${since_last}s ago (<${ESCALATE_AFTER_SEC}s) — waiting"
         write_state
         exit 0
     fi
