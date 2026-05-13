@@ -120,11 +120,13 @@ Reboot. After the next freeze you can run `sudo journalctl -b -1 -e` and actuall
 The Pi has a BCM2835 hardware watchdog at `/dev/watchdog0`. systemd can use it to auto-reboot if the kernel stops responding. Add to `/etc/systemd/system.conf`:
 
 ```
-RuntimeWatchdogSec=30s
+RuntimeWatchdogSec=14s
 RebootWatchdogSec=2min
 ```
 
-After reboot, verify with `journalctl -b | grep -i watchdog` — you should see `Using hardware watchdog 'Broadcom BCM2835 Watchdog timer'`. From now on, a kernel hang of more than 30 s auto-resets the Pi instead of needing a manual power cycle.
+After reboot, verify with `journalctl -b | grep -i watchdog` — you should see `Using hardware watchdog 'Broadcom BCM2835 Watchdog timer'`. From now on, a kernel hang of more than ~14 s auto-resets the Pi instead of needing a manual power cycle.
+
+**Why 14s, not higher:** the BCM2835 hardware watchdog has a maximum timeout of about 15 seconds. If you set `RuntimeWatchdogSec` to `30s` (or any higher value), systemd logs `Failed to set timeout to 30s: Invalid argument` on each boot and silently falls back to the hardware default. Setting it to `14s` matches what the hardware actually supports and keeps the journal clean.
 
 ### 3. Kernel DVB modules silently break dump1090 (the worst one)
 
