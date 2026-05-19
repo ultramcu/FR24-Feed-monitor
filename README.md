@@ -128,6 +128,15 @@ After reboot, verify with `journalctl -b | grep -i watchdog` — you should see 
 
 **Why 14s, not higher:** the BCM2835 hardware watchdog has a maximum timeout of about 15 seconds. If you set `RuntimeWatchdogSec` to `30s` (or any higher value), systemd logs `Failed to set timeout to 30s: Invalid argument` on each boot and silently falls back to the hardware default. Setting it to `14s` matches what the hardware actually supports and keeps the journal clean.
 
+**Disable the userspace `watchdog` daemon if it's installed.** Some Pi images ship the Debian `watchdog` package (separate from systemd). It runs `/usr/sbin/watchdog` as a service and tries to open `/dev/watchdog` itself — but systemd PID 1 has already claimed the device, so the daemon logs `cannot open /dev/watchdog (errno = 16 = 'Device or resource busy')` and runs as a non-functional zombie that can't actually pet or trigger the watchdog. It also tends to ship with a misconfigured `/etc/watchdog.conf` (e.g. `temperature-device` pointing at a path it can't read, `Ignoring invalid option at line N`). Cleanest fix is to just turn it off and let systemd own the watchdog:
+
+```sh
+sudo systemctl stop watchdog.service
+sudo systemctl disable watchdog.service
+```
+
+Confirm with `sudo fuser -v /dev/watchdog0` — only `systemd` (PID 1) should be holding it.
+
 ### 3. Kernel DVB modules silently break dump1090 (the worst one)
 
 This is the most insidious failure mode and it cost us a full day. The kernel auto-loads several modules when an RTL-SDR dongle is plugged in, because the chip identifies as a DVB-T receiver:
